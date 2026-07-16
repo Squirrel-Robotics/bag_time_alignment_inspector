@@ -34,6 +34,17 @@ class ReferenceSamplingTests(unittest.TestCase):
     def test_empty_reference_has_no_samples(self):
         self.assertEqual(select_reference_samples([]), [])
 
+    def test_explicit_head_skip_frames_replaces_time_trim(self):
+        timestamps = [index * SECOND // 10 for index in range(31)]
+        self.assertEqual(
+            select_reference_samples(timestamps, head_skip_frames=5),
+            [index * SECOND // 10 for index in range(5, 21, 3)],
+        )
+
+    def test_negative_head_skip_frames_is_rejected(self):
+        with self.assertRaises(ValueError):
+            select_reference_samples([SECOND], head_skip_frames=-1)
+
 
 if __name__ == "__main__":
     unittest.main()

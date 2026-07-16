@@ -5,6 +5,7 @@ from presentation import (
     BAG_DETAIL_HEADERS,
     SUMMARY_HEADERS,
     bag_verdict,
+    sampling_stats_to_summary_df,
     stats_to_bag_detail_df,
     stats_to_per_bag_detail_html,
     stats_to_summary_df,
@@ -29,6 +30,16 @@ def make_stat(name: str, delay: float) -> BagDelayStat:
 
 
 class PresentationTests(unittest.TestCase):
+    def test_sampling_summary_expands_head_skip_and_threshold_dimensions(self):
+        frame = sampling_stats_to_summary_df(
+            {
+                0: [make_stat("a.bag", 35.0)],
+                30: [make_stat("a.bag", 45.0)],
+            }
+        )
+        self.assertEqual(len(frame), 2 * 7)
+        self.assertEqual(frame["开头跳过帧数"].drop_duplicates().tolist(), [0, 30])
+
     def test_threshold_changes_verdict(self):
         stat = make_stat("sample.bag", 45.0)
         self.assertEqual(bag_verdict(stat, threshold_ms=40)[0], "不合格")

@@ -4,10 +4,10 @@
 
 ## 主要功能
 
-1. 扫描输入目录下的所有 `.bag` 文件，并浏览每个 Bag 的 Topic 元信息。
+1. 合并扫描多个输入目录下的所有 `.bag` 文件，并浏览每个 Bag 的 Topic 元信息。
 2. 自动排除 Reference Topic 与配置中的忽略 Topic，支持手动选择检查项。
 3. 逐 Bag、逐 Topic 计算相对 Reference 的最大时间偏差。
-4. 同时生成多个阈值的总体统计。
+4. 支持配置多个 Reference 开头跳帧值，并生成“跳帧数 × 阈值”的总体统计。
 5. 按选定阈值动态判定每个 Bag 是否合格，不合格项优先展示。
 6. 以卡片和状态色展示每个 Bag 的 Topic 明细，并按当前阈值列出坏点相对时刻、ROS 时间戳和 Delay。
 7. 按阈值筛选并复制合格 Bag，保留相对目录结构。
@@ -37,7 +37,9 @@ bag_time_alignment_inspector/
 
 所有对齐时间均读取自 ROS 消息内部的顶层 `header.stamp`，不使用 bag record timestamp。普通 Topic 使用消息顶层 `header.stamp`；`/tf` 与 `/tf_static` 会遍历 `TFMessage.transforms`，使用每条 transform 自己的 `header.stamp`，不使用 Bag record time。
 
-Reference 时间戳会跳过起始 2.0 秒、删除结尾 10 帧，再每 3 个时间样本采样一次。对每个采样时间戳，使用二分搜索查找目标 Topic 的最近消息，并统计最大时间偏差。没有有效 `header.stamp`、Header 不完整或反序列化失败的已选 Topic 会被视为不可用。
+Web 页面可配置 Reference 开头跳过的帧数（支持逗号或空格分隔的多个值）；每种配置都会删除结尾 10 帧，再每 3 个时间样本采样一次，并分别生成多阈值汇总。命令行兼容接口默认仍沿用跳过起始 2.0 秒的旧规则。对每个采样时间戳，使用二分搜索查找目标 Topic 的最近消息，并统计最大时间偏差。没有有效 `header.stamp`、Header 不完整或反序列化失败的已选 Topic 会被视为不可用。
+
+输入目录文本框每行填写一个目录，也可以通过目录浏览器逐个添加。多目录导出时会为每个输入根目录增加编号前缀（例如 `01_raw_bags/`），避免不同目录中的同名 Bag 相互覆盖。
 
 ## 依赖
 

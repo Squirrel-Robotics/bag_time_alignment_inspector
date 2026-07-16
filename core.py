@@ -641,13 +641,26 @@ def _nearest_delay_ms(sorted_times_ns: list[int], target_ns: int) -> float:
     return min(abs(c - target_ns) for c in cands) / 1e6
 
 
-def select_reference_samples(times_ns: list[int]) -> list[int]:
-    """跳过 Reference 起始 2 秒、删除结尾 10 帧，再每 3 帧取 1 帧。"""
+def select_reference_samples(
+    times_ns: list[int],
+    *,
+    head_skip_frames: int | None = None,
+) -> list[int]:
+    """裁剪并采样 Reference 时间轴。
+
+    ``head_skip_frames=None`` 保留旧行为（按时间跳过起始 2 秒）；传入非负整数时
+    改为精确跳过对应数量的帧。尾部裁剪和采样步长仍使用项目全局规则。
+    """
     ordered = sorted(times_ns)
     if not ordered:
         return []
-    cutoff_ns = ordered[0] + int(REFERENCE_HEAD_TRIM_SECONDS * 1_000_000_000)
-    first_kept = bisect_left(ordered, cutoff_ns)
+    if head_skip_frames is None:
+        cutoff_ns = ordered[0] + int(REFERENCE_HEAD_TRIM_SECONDS * 1_000_000_000)
+        first_kept = bisect_left(ordered, cutoff_ns)
+    else:
+        if head_skip_frames < 0:
+            raise ValueError("head_skip_frames must be >= 0")
+        first_kept = head_skip_frames
     head_trimmed = ordered[first_kept:]
     if len(head_trimmed) <= REFERENCE_TAIL_TRIM_FRAMES:
         return []
@@ -660,6 +673,7 @@ def measure_bag_delay(
     *,
     reference_topic: str,
     target_topics: list[str],
+    head_skip_frames: int | None = None,
 ) -> BagDelayStat:
     """以 reference 为主轴，对多个 target topic 计算 max delay。
 
@@ -716,7 +730,10 @@ def measure_bag_delay(
 
         reference_times = sorted(header_times[reference_topic])
         reference_start_ns = reference_times[0] if reference_times else None
-        ref = select_reference_samples(reference_times)
+        ref = select_reference_samples(
+            reference_times,
+            head_skip_frames=head_skip_frames,
+        )
         if not ref:
             topic_stats = [
                 TopicAlignStat(
@@ -733,7 +750,13 @@ def measure_bag_delay(
                 missing_reference=True,
                 message=(
                     "Reference topic exists but has 0 usable messages after "
-                    f"sampling (skip first {REFERENCE_HEAD_TRIM_SECONDS:g}s, "
+                    "sampling ("
+                    + (
+                        f"skip first {REFERENCE_HEAD_TRIM_SECONDS:g}s"
+                        if head_skip_frames is None
+                        else f"skip first {head_skip_frames} frames"
+                    )
+                    + ", "
                     f"drop last {REFERENCE_TAIL_TRIM_FRAMES} frames, "
                     f"stride {REFERENCE_SAMPLE_STRIDE})"
                 ),
@@ -899,7 +922,8 @@ def copy_keepable_bags(
     stats: list[BagDelayStat],
     *,
     threshold_ms: float,
-    input_root: Path,
+    input_root: Path | None = None,
+    input_roots: list[Path] | None = None,
     output_folder: str | Path,
 ) -> Iterator[tuple[float, str, str, int, int]]:
     """复制可保留 bag。yield (progress, log_line, status, copied, failed)。"""
@@ -913,12 +937,32 @@ def copy_keepable_bags(
         return
 
     copied = failed = 0
+    roots = [Path(root).expanduser().resolve() for root in (input_roots or [])]
+    if input_root is not None:
+        resolved_single = Path(input_root).expanduser().resolve()
+        if resolved_single not in roots:
+            roots.insert(0, resolved_single)
+
+    root_labels: dict[Path, str] = {}
+    if len(roots) > 1:
+        for index, root in enumerate(roots, start=1):
+            safe_name = root.name or "root"
+            root_labels[root] = f"{index:02d}_{safe_name}"
+
     for i, s in enumerate(selected, start=1):
         src = Path(s.bag_path)
-        try:
-            rel = src.relative_to(input_root)
-        except ValueError:
-            rel = Path(src.name)
+        rel = Path(src.name)
+        for root in roots:
+            try:
+                under_root = src.resolve().relative_to(root)
+            except ValueError:
+                continue
+            rel = (
+                Path(root_labels[root]) / under_root
+                if len(roots) > 1
+                else under_root
+            )
+            break
         dest = out / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -947,6 +991,7 @@ def iter_measure_bags(
     *,
     reference_topic: str,
     target_topics: list[str],
+    head_skip_frames: int | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> Iterator[tuple[float, str, list[BagDelayStat]]]:
     """逐个测量 bag，yield (progress, status, stats_so_far)。"""
@@ -980,6 +1025,7 @@ def iter_measure_bags(
                 bag,
                 reference_topic=reference_topic,
                 target_topics=targets,
+                head_skip_frames=head_skip_frames,
             )
         )
         s = stats[-1]

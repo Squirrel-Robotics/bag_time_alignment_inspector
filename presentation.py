@@ -19,6 +19,7 @@ from core import (
 
 TOPIC_HEADERS = ["Topic", "消息类型", "消息数量", "频率 (Hz)"]
 SUMMARY_HEADERS = [
+    "开头跳过帧数",
     "阈值τ",
     "总 Bag 数",
     "可评估 Bag 数",
@@ -61,15 +62,35 @@ def empty_per_bag_detail_html() -> str:
         '</div>'
     )
 
-def stats_to_summary_df(stats: list[BagDelayStat]) -> pd.DataFrame:
+def stats_to_summary_df(
+    stats: list[BagDelayStat],
+    *,
+    head_skip_frames: int | str = "按时间 2s",
+) -> pd.DataFrame:
     rows = build_threshold_summary(
         stats,
         thresholds_ms=list(DEFAULT_THRESHOLDS_MS),
     )
     if not rows:
         return empty_summary_df()
+    for row in rows:
+        row["开头跳过帧数"] = head_skip_frames
     df = pd.DataFrame(rows)
     return df[SUMMARY_HEADERS]
+
+
+def sampling_stats_to_summary_df(
+    stats_by_head_skip: dict[int, list[BagDelayStat]],
+) -> pd.DataFrame:
+    """把多个开头跳帧配置展开为“跳帧数 × 阈值”报表。"""
+    frames = [
+        stats_to_summary_df(stats, head_skip_frames=head_skip)
+        for head_skip, stats in stats_by_head_skip.items()
+        if stats
+    ]
+    if not frames:
+        return empty_summary_df()
+    return pd.concat(frames, ignore_index=True)[SUMMARY_HEADERS]
 
 
 def bag_verdict(
