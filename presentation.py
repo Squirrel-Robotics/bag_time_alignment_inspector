@@ -110,6 +110,83 @@ def bag_verdict(
     return "不合格", "；".join(reasons), n_over, n_miss, n_ok
 
 
+
+BAG_REASON_BAD_POINT_LIMIT = 8
+
+
+def _format_topic_bad_points(
+    stat: BagDelayStat,
+    topic: TopicAlignStat,
+    *,
+    threshold_ms: float,
+) -> str:
+    points = sorted(
+        (
+            (timestamp_ns, delay_ms)
+            for timestamp_ns, delay_ms in topic.delay_samples
+            if delay_ms > threshold_ms
+        ),
+        key=lambda item: item[0],
+    )
+    if not points:
+        return "坏点时刻未记录"
+
+    origin_ns = stat.reference_start_ns
+    if origin_ns is None:
+        origin_ns = points[0][0]
+    total = len(points)
+    if total <= BAG_REASON_BAD_POINT_LIMIT:
+        visible = points
+        scope = f"坏点 {total} 个"
+        suffix = ""
+    else:
+        half = BAG_REASON_BAD_POINT_LIMIT // 2
+        visible = [*points[:half], *points[-half:]]
+        scope = f"坏点 {total} 个（显示首尾各 {half} 个）"
+        suffix = "；完整列表见下方 Topic 详情"
+
+    labels = [
+        f"+{(timestamp_ns - origin_ns) / 1e9:.3f} s ({delay_ms:.3f} ms)"
+        for timestamp_ns, delay_ms in visible
+    ]
+    return f"{scope}：{'、'.join(labels)}{suffix}"
+
+
+def detailed_bag_failure_reason(
+    stat: BagDelayStat,
+    *,
+    threshold_ms: float,
+) -> str:
+    """为 Bag 汇总表生成包含具体 Topic 与坏点时刻的不合格原因。"""
+    details: list[str] = []
+    if stat.missing_reference:
+        details.append(f"Reference：{stat.message or '缺失或不可用'}")
+
+    for topic in stat.topic_stats:
+        if topic.empty or (
+            topic.missing and "0 messages" in (topic.message or "")
+        ):
+            details.append(f"{topic.topic}：无消息（{topic.message or '无有效 header.stamp'}）")
+        elif topic.missing:
+            details.append(f"{topic.topic}：缺少 Topic（{topic.message or 'topic not in bag'}）")
+        elif topic.max_delay_ms is None:
+            details.append(f"{topic.topic}：不可用（{topic.message or '无有效对齐结果'}）")
+        elif topic.max_delay_ms > threshold_ms:
+            bad_points = _format_topic_bad_points(
+                stat,
+                topic,
+                threshold_ms=threshold_ms,
+            )
+            details.append(
+                f"{topic.topic}：Max {topic.max_delay_ms:.3f} ms；{bad_points}"
+            )
+
+    if details:
+        return " | ".join(details)
+    if stat.max_delay_ms is not None and stat.max_delay_ms > threshold_ms:
+        return f"Worst max_delay={stat.max_delay_ms:.3f} ms > {threshold_ms:g} ms"
+    return stat.message or "未通过对齐检查"
+
 def stats_to_bag_detail_df(
     stats: list[BagDelayStat],
     *,
@@ -117,7 +194,14 @@ def stats_to_bag_detail_df(
 ) -> pd.DataFrame:
     rows = []
     for s in stats:
-        verdict, reason, n_over, n_miss, n_ok = bag_verdict(s, threshold_ms=threshold_ms)
+        verdict, _reason, n_over, n_miss, n_ok = bag_verdict(
+            s, threshold_ms=threshold_ms
+        )
+        reason = (
+            detailed_bag_failure_reason(s, threshold_ms=threshold_ms)
+            if verdict == "不合格"
+            else ""
+        )
         n_all = len(s.topic_stats)
         rows.append(
             {
@@ -192,25 +276,46 @@ def stats_to_per_bag_detail_html(
     *,
     check_topics: list[str] | None,
     threshold_ms: float,
+    failed_only: bool = False,
 ) -> str:
     if not stats:
         return empty_per_bag_detail_html()
 
     check = [t for t in (check_topics or []) if t and t != DEFAULT_REF_TOPIC]
+    indexed_stats = list(enumerate(stats, start=1))
+    if failed_only:
+        indexed_stats = [
+            (index, stat)
+            for index, stat in indexed_stats
+            if bag_verdict(stat, threshold_ms=threshold_ms)[0] != "合格"
+        ]
+    if not indexed_stats:
+        return (
+            '<div class="bag-details-empty">'
+            f'当前 {threshold_ms:g} ms 阈值下没有不合格 Bag。'
+            '</div>'
+        )
+
     order = " → ".join(STATUS_ORDER)
+    visible_note = (
+        f"仅显示不合格 Bag：{len(indexed_stats)} / {len(stats)}"
+        if failed_only
+        else f"显示全部 Bag：{len(stats)}"
+    )
     parts = [
         '<div class="bag-details">',
         (
             '<div class="bag-details-toolbar">'
             '<span class="toolbar-label">Topic 详情</span>'
             f'<span>判定阈值 <strong>{threshold_ms:g} ms</strong></span>'
+            f'<span>{html.escape(visible_note)}</span>'
             '<span class="toolbar-divider"></span>'
             f'<span>排序：{html.escape(order)}</span>'
             '</div>'
         ),
     ]
 
-    for index, s in enumerate(stats, start=1):
+    for index, s in indexed_stats:
         rows = classify_bag_topic_rows(
             s,
             check_topics=check,

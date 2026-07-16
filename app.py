@@ -243,7 +243,12 @@ def do_show_topics(selected_rel: str, state: dict, check_topics: list[str] | Non
     )
 
 
-def do_analyze(check_topics: list[str] | None, state: dict, detail_threshold: str):
+def do_analyze(
+    check_topics: list[str] | None,
+    state: dict,
+    detail_threshold: str,
+    failed_only: bool = False,
+):
     _analyze_stop.clear()
     targets = [t for t in (check_topics or []) if t and t != DEFAULT_REF_TOPIC]
     empty_sum = empty_summary_df()
@@ -277,7 +282,12 @@ def do_analyze(check_topics: list[str] | None, state: dict, detail_threshold: st
             stats_to_bag_detail_df(stats, threshold_ms=tau) if stats else empty_bag
         )
         detail_html = (
-            stats_to_per_bag_detail_html(stats, check_topics=targets, threshold_ms=tau)
+            stats_to_per_bag_detail_html(
+                stats,
+                check_topics=targets,
+                threshold_ms=tau,
+                failed_only=failed_only,
+            )
             if stats
             else empty_md
         )
@@ -288,7 +298,11 @@ def do_analyze(check_topics: list[str] | None, state: dict, detail_threshold: st
             return
 
 
-def refresh_detail_views(detail_threshold: str, state: dict):
+def refresh_detail_views(
+    detail_threshold: str,
+    state: dict,
+    failed_only: bool = False,
+):
     """切换详情判定阈值时，刷新 bag 汇总判定 + 每 bag Topic 表。"""
     empty_bag = empty_bag_detail_df()
     empty_md = empty_per_bag_detail_html()
@@ -304,6 +318,7 @@ def refresh_detail_views(detail_threshold: str, state: dict):
         state["stats"],
         check_topics=check,
         threshold_ms=tau,
+        failed_only=failed_only,
     )
     return bag_df, detail_html
 
@@ -561,6 +576,12 @@ def build_ui() -> gr.Blocks:
                 '<span>每个 Bag 独立卡片</span>'
                 '</div>'
             )
+            failed_only = gr.Checkbox(
+                label="只看不合格 Bag",
+                value=False,
+                info="勾选后仅显示当前判定阈值下不合格的 Bag 独立卡片",
+                elem_classes=["bag-failed-filter"],
+            )
             with gr.Column(elem_classes=["bag-detail-scroll"]):
                 per_bag_detail_html = gr.HTML(
                     empty_per_bag_detail_html(),
@@ -681,7 +702,7 @@ def build_ui() -> gr.Blocks:
 
         analyze_event = analyze_btn.click(
             fn=do_analyze,
-            inputs=[check_topics, state, detail_threshold],
+            inputs=[check_topics, state, detail_threshold, failed_only],
             outputs=[
                 analyze_progress,
                 analyze_status,
@@ -700,7 +721,12 @@ def build_ui() -> gr.Blocks:
 
         detail_threshold.change(
             fn=refresh_detail_views,
-            inputs=[detail_threshold, state],
+            inputs=[detail_threshold, state, failed_only],
+            outputs=[bag_detail_table, per_bag_detail_html],
+        )
+        failed_only.change(
+            fn=refresh_detail_views,
+            inputs=[detail_threshold, state, failed_only],
             outputs=[bag_detail_table, per_bag_detail_html],
         )
 
