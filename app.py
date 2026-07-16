@@ -151,8 +151,11 @@ def add_input_folder(current: str, selected: str) -> str:
     return "\n".join(str(root) for root in roots)
 
 
-def _parse_head_skip_frames(value: str) -> list[int]:
-    parts = [part.strip() for part in re.split(r"[,，;；\s]+", value or "")]
+def _parse_head_skip_frames(value: str | list[str] | list[int]) -> list[int]:
+    if isinstance(value, list):
+        parts = [str(part).strip() for part in value]
+    else:
+        parts = [part.strip() for part in re.split(r"[,，;；\s]+", value or "")]
     values: list[int] = []
     for part in parts:
         if not part:
@@ -320,7 +323,7 @@ def do_analyze(
     check_topics: list[str] | None,
     state: dict,
     detail_threshold: str,
-    head_skip_frames_text: str,
+    head_skip_frames_value: list[str] | list[int],
 ):
     _analyze_stop.clear()
     targets = [t for t in (check_topics or []) if t and t != DEFAULT_REF_TOPIC]
@@ -341,7 +344,7 @@ def do_analyze(
         yield 0, tip, empty_sum, empty_bag, empty_md, state, gr.update(), gr.update()
         return
     try:
-        head_skip_values = _parse_head_skip_frames(head_skip_frames_text)
+        head_skip_values = _parse_head_skip_frames(head_skip_frames_value)
     except ValueError as exc:
         tip = f"跳帧参数无效：{exc}"
         yield 0, tip, empty_sum, empty_bag, empty_md, state, gr.update(), gr.update()
@@ -646,10 +649,11 @@ def build_ui() -> gr.Blocks:
                     interactive=False,
                     scale=2,
                 )
-                head_skip_frames = gr.Textbox(
+                head_skip_frames = gr.CheckboxGroup(
                     label="开头跳过帧数",
-                    info="多个值用逗号或空格分隔，例如：0, 30, 60",
-                    value="0",
+                    info="选择需要生成报表的固定跳帧配置",
+                    choices=["0", "15", "30", "45", "60"],
+                    value=["0", "15", "30", "45", "60"],
                     scale=1,
                 )
                 detail_threshold = gr.Dropdown(

@@ -37,7 +37,7 @@ bag_time_alignment_inspector/
 
 所有对齐时间均读取自 ROS 消息内部的顶层 `header.stamp`，不使用 bag record timestamp。普通 Topic 使用消息顶层 `header.stamp`；`/tf` 与 `/tf_static` 会遍历 `TFMessage.transforms`，使用每条 transform 自己的 `header.stamp`，不使用 Bag record time。
 
-Web 页面可配置 Reference 开头跳过的帧数（支持逗号或空格分隔的多个值）；每种配置都会删除结尾 10 帧，再每 3 个时间样本采样一次，并分别生成多阈值汇总。命令行兼容接口默认仍沿用跳过起始 2.0 秒的旧规则。对每个采样时间戳，使用二分搜索查找目标 Topic 的最近消息，并统计最大时间偏差。没有有效 `header.stamp`、Header 不完整或反序列化失败的已选 Topic 会被视为不可用。
+Web 页面提供固定的 Reference 开头跳帧选项：0、15、30、45、60；每种勾选配置都会删除结尾 10 帧，再每 3 个时间样本采样一次，并分别生成多阈值汇总。命令行兼容接口默认仍沿用跳过起始 2.0 秒的旧规则。对每个采样时间戳，使用二分搜索查找目标 Topic 的最近消息，并统计最大时间偏差。没有有效 `header.stamp`、Header 不完整或反序列化失败的已选 Topic 会被视为不可用。
 
 输入目录文本框每行填写一个目录，也可以通过目录浏览器逐个添加。多目录导出时会为每个输入根目录增加编号前缀（例如 `01_raw_bags/`），避免不同目录中的同名 Bag 相互覆盖。
 
