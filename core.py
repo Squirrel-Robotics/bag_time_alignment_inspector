@@ -22,6 +22,7 @@ DEFAULT_THRESHOLD_MS = 40.0
 DEFAULT_THRESHOLDS_MS: list[float] = [30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 300.0]
 REFERENCE_HEAD_TRIM_SECONDS = 2.0
 REFERENCE_SAMPLE_STRIDE = 3
+REFERENCE_TAIL_TRIM_FRAMES = 10
 TF_CHAIN_MAX_SPREAD_MS = 5.0
 TF_ARM_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     "左臂": (
@@ -641,15 +642,17 @@ def _nearest_delay_ms(sorted_times_ns: list[int], target_ns: int) -> float:
 
 
 def select_reference_samples(times_ns: list[int]) -> list[int]:
-    """跳过 Reference 起始 2 秒，再每 3 个时间样本取 1 个。"""
+    """跳过 Reference 起始 2 秒、删除结尾 10 帧，再每 3 帧取 1 帧。"""
     ordered = sorted(times_ns)
     if not ordered:
         return []
     cutoff_ns = ordered[0] + int(REFERENCE_HEAD_TRIM_SECONDS * 1_000_000_000)
     first_kept = bisect_left(ordered, cutoff_ns)
-    if first_kept >= len(ordered):
+    head_trimmed = ordered[first_kept:]
+    if len(head_trimmed) <= REFERENCE_TAIL_TRIM_FRAMES:
         return []
-    return ordered[first_kept::REFERENCE_SAMPLE_STRIDE]
+    trimmed = head_trimmed[:-REFERENCE_TAIL_TRIM_FRAMES]
+    return trimmed[::REFERENCE_SAMPLE_STRIDE]
 
 
 def measure_bag_delay(
@@ -731,7 +734,8 @@ def measure_bag_delay(
                 message=(
                     "Reference topic exists but has 0 usable messages after "
                     f"sampling (skip first {REFERENCE_HEAD_TRIM_SECONDS:g}s, "
-                    f"keep tail, stride {REFERENCE_SAMPLE_STRIDE})"
+                    f"drop last {REFERENCE_TAIL_TRIM_FRAMES} frames, "
+                    f"stride {REFERENCE_SAMPLE_STRIDE})"
                 ),
                 topic_stats=topic_stats,
                 bag_topics=bag_topics,
@@ -1040,7 +1044,8 @@ def analyze_bag(
                 message=(
                     "Topic exists but has 0 usable messages after reference "
                     f"sampling (skip first {REFERENCE_HEAD_TRIM_SECONDS:g}s, "
-                    f"keep tail, stride {REFERENCE_SAMPLE_STRIDE})"
+                    f"drop last {REFERENCE_TAIL_TRIM_FRAMES} frames, "
+                    f"stride {REFERENCE_SAMPLE_STRIDE})"
                 ),
             )
 

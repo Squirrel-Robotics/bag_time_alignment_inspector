@@ -17,6 +17,7 @@
 ```text
 bag_time_alignment_inspector/
 ├── app.py                 # Gradio 页面编排、状态和事件处理
+├── batch_align_40ms.py    # 固定 40 ms 的命令行批量检查与可选复制脚本
 ├── core.py                # Bag 读取、时间对齐、筛选与复制
 ├── presentation.py        # 判定结果转换、DataFrame 与详情 HTML
 ├── styles.py              # 全局主题、卡片、表格和响应式样式
@@ -36,7 +37,7 @@ bag_time_alignment_inspector/
 
 所有对齐时间均读取自 ROS 消息内部的顶层 `header.stamp`，不使用 bag record timestamp。普通 Topic 使用消息顶层 `header.stamp`；`/tf` 与 `/tf_static` 会遍历 `TFMessage.transforms`，使用每条 transform 自己的 `header.stamp`，不使用 Bag record time。
 
-Reference 时间戳会跳过起始 2.0 秒、保留结尾，再每 3 个时间样本采样一次。对每个采样时间戳，使用二分搜索查找目标 Topic 的最近消息，并统计最大时间偏差。没有有效 `header.stamp`、Header 不完整或反序列化失败的已选 Topic 会被视为不可用。
+Reference 时间戳会跳过起始 2.0 秒、删除结尾 10 帧，再每 3 个时间样本采样一次。对每个采样时间戳，使用二分搜索查找目标 Topic 的最近消息，并统计最大时间偏差。没有有效 `header.stamp`、Header 不完整或反序列化失败的已选 Topic 会被视为不可用。
 
 ## 依赖
 
@@ -83,3 +84,21 @@ python -m unittest discover -s tests -v
 - 每条完整链内所有 transform 使用各自的 `header.stamp`；最大值与最小值之差必须严格小于 5 ms，并同时统计是否严格相同。
 - 通过链内检查后，取 8 个 `header.stamp` 的中位数作为整条链的时间戳，再与头部相机 Reference 时间轴做最近邻对齐。
 - `/tf_static` 仍按每条 transform 自身的时间戳读取；静态末端执行器链接不参与动态逐帧同步。
+
+
+## 40 ms 批量对齐脚本
+
+脚本复用网页工具当前的 `header.stamp`、完整 TF 手臂链中位数和最近邻对齐算法，固定阈值为 40 ms。默认排除 `/tf_static`、`/humanoid_wheel/eePoses`、`/manus/left/finger_curl`、`/manus/right/finger_curl`。
+
+只检查并生成 CSV 报告：
+
+```bash
+conda activate openpi
+python batch_align_40ms.py --input /mnt/data/kuavo/raw_bags --report alignment_report_40ms.csv
+```
+
+检查后额外复制合格 Bag（保留相对目录结构）：
+
+```bash
+python batch_align_40ms.py --input /mnt/data/kuavo/raw_bags --report alignment_report_40ms.csv --copy-to /mnt/data/kuavo/tmp
+```
