@@ -53,6 +53,7 @@ logging.basicConfig(
 logger = logging.getLogger("bag_inspector")
 
 _analyze_stop = threading.Event()
+HEAD_SKIP_FRAME_CHOICES = ["0", "15", "30", "45", "60"]
 
 def _check_topic_update(all_topics: list[str], selected: list[str] | None = None):
     """更新可检查 Topic 勾选：默认全选（不含 Reference 与 /tf_static）。"""
@@ -394,7 +395,14 @@ def do_analyze(
                 else empty_md
             )
             prefixed_status = f"跳过 {head_skip} 帧 · {status}"
-            dropdown_update = gr.update(choices=choices, value=str(detail_head_skip))
+            detail_dropdown_update = gr.update(
+                choices=choices,
+                value=str(detail_head_skip),
+            )
+            export_dropdown_update = gr.update(
+                choices=choices,
+                value=str(detail_head_skip),
+            )
             yield (
                 progress,
                 prefixed_status,
@@ -402,8 +410,8 @@ def do_analyze(
                 bag_df,
                 detail_html,
                 state,
-                dropdown_update,
-                dropdown_update,
+                detail_dropdown_update,
+                export_dropdown_update,
             )
             if _analyze_stop.is_set():
                 tip = "分析已停止。"
@@ -414,8 +422,8 @@ def do_analyze(
                     bag_df,
                     detail_html,
                     state,
-                    dropdown_update,
-                    dropdown_update,
+                    detail_dropdown_update,
+                    export_dropdown_update,
                 )
                 return
 
@@ -650,10 +658,10 @@ def build_ui() -> gr.Blocks:
                     scale=2,
                 )
                 head_skip_frames = gr.CheckboxGroup(
-                    label="开头跳过帧数",
-                    info="选择需要生成报表的固定跳帧配置",
-                    choices=["0", "15", "30", "45", "60"],
-                    value=["0", "15", "30", "45", "60"],
+                    label="生成报表的开头跳帧配置",
+                    info="每个勾选值都会独立计算，并进入跳帧数 × 阈值总览",
+                    choices=HEAD_SKIP_FRAME_CHOICES,
+                    value=HEAD_SKIP_FRAME_CHOICES,
                     scale=1,
                 )
                 detail_threshold = gr.Dropdown(
@@ -668,9 +676,9 @@ def build_ui() -> gr.Blocks:
                     scale=1,
                 )
                 detail_head_skip = gr.Dropdown(
-                    label="详情跳帧数",
-                    info="分析后切换对应的 Bag 详情",
-                    choices=["0"],
+                    label="当前查看的开头跳帧数",
+                    info="只切换下方 Bag 详情，不会重新分析，也不影响总览",
+                    choices=HEAD_SKIP_FRAME_CHOICES,
                     value="0",
                     interactive=True,
                     scale=1,
@@ -697,7 +705,8 @@ def build_ui() -> gr.Blocks:
             gr.HTML(
                 '<div class="summary-guide">'
                 '每个开头跳帧配置分别生成多阈值统计；合格率以全部 Bag 为分母；'
-                '“较前档新增”表示同一跳帧配置下，阈值放宽后新增的可保留 Bag 数。'
+                '同一阈值下按 0、15、30、45、60 排列；“较前档新增”表示同一跳帧配置下，'
+                '阈值放宽后新增的可保留 Bag 数。'
                 '</div>'
             )
             summary_table = gr.Dataframe(
@@ -752,7 +761,7 @@ def build_ui() -> gr.Blocks:
             with gr.Row():
                 export_head_skip = gr.Dropdown(
                     label="导出跳帧数",
-                    choices=["0"],
+                    choices=HEAD_SKIP_FRAME_CHOICES,
                     value="0",
                     interactive=True,
                     scale=1,

@@ -83,14 +83,22 @@ def sampling_stats_to_summary_df(
     stats_by_head_skip: dict[int, list[BagDelayStat]],
 ) -> pd.DataFrame:
     """把多个开头跳帧配置展开为“跳帧数 × 阈值”报表。"""
-    frames = [
-        stats_to_summary_df(stats, head_skip_frames=head_skip)
+    frames = {
+        head_skip: stats_to_summary_df(stats, head_skip_frames=head_skip)
         for head_skip, stats in stats_by_head_skip.items()
         if stats
-    ]
+    }
     if not frames:
         return empty_summary_df()
-    return pd.concat(frames, ignore_index=True)[SUMMARY_HEADERS]
+
+    # 同一阈值下依次展示所有跳帧配置，避免表格首屏只出现一整组“0 帧”。
+    rows: list[dict] = []
+    row_count = max(len(frame) for frame in frames.values())
+    for row_index in range(row_count):
+        for frame in frames.values():
+            if row_index < len(frame):
+                rows.append(frame.iloc[row_index].to_dict())
+    return pd.DataFrame(rows)[SUMMARY_HEADERS]
 
 
 def bag_verdict(

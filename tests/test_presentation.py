@@ -39,6 +39,7 @@ class PresentationTests(unittest.TestCase):
         )
         self.assertEqual(len(frame), 2 * 7)
         self.assertEqual(frame["开头跳过帧数"].drop_duplicates().tolist(), [0, 30])
+        self.assertEqual(frame["开头跳过帧数"].head(4).tolist(), [0, 30, 0, 30])
 
     def test_threshold_changes_verdict(self):
         stat = make_stat("sample.bag", 45.0)
