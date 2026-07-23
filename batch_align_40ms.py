@@ -26,6 +26,9 @@ EXCLUDED_TOPICS = frozenset(
         "/humanoid_wheel/eePoses",
         "/manus/left/finger_curl",
         "/manus/right/finger_curl",
+        "/cam_h/depth/camera_info",
+        "/cam_h/depth/image_raw/compressedDepth",
+        "/cam_h/depth/metadata",
     }
 )
 

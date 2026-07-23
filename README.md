@@ -4,7 +4,7 @@
 
 ## 主要功能
 
-1. 扫描输入目录下的所有 `.bag` 文件，并浏览每个 Bag 的 Topic 元信息。
+1. 支持输入一个或多个目录（每行一个，也可用分号分隔），合并、去重扫描其中的所有 `.bag` 文件，并浏览每个 Bag 的 Topic 元信息。
 2. 自动排除 Reference Topic 与配置中的忽略 Topic，支持手动选择检查项。
 3. 逐 Bag、逐 Topic 计算相对 Reference 的最大时间偏差。
 4. 同时生成多个阈值的总体统计。
@@ -64,7 +64,7 @@ python app.py
 
 | 配置 | 默认值 |
 |---|---|
-| 输入目录 | `/mnt/data/kuavo/raw_bags` |
+| 输入目录 | `/mnt/data/kuavo/raw_bags`；Web 页面可填写多个目录 |
 | 输出目录 | `/mnt/data/kuavo/tmp` |
 | Reference Topic | `/cam_h/color/image_raw/compressed` |
 | 阈值 | 以 `core.py` 中的 `DEFAULT_THRESHOLDS_MS` 为准 |

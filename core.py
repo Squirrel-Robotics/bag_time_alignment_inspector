@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import errno
 import logging
+import multiprocessing
+import os
 import shutil
+import tempfile
 from bisect import bisect_left
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import median
+from time import monotonic
 from typing import Callable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
@@ -20,6 +33,10 @@ DEFAULT_EXCLUDE_TOPICS: frozenset[str] = frozenset({"/tf_static"})
 TF_TOPICS: frozenset[str] = frozenset({"/tf", "/tf_static"})
 DEFAULT_THRESHOLD_MS = 40.0
 DEFAULT_THRESHOLDS_MS: list[float] = [30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 300.0]
+DEFAULT_ANALYSIS_WORKERS = 8
+MAX_ANALYSIS_WORKERS = 16
+ANALYSIS_STOP_POLL_SECONDS = 0.25
+ANALYSIS_UI_UPDATE_SECONDS = 1.0
 REFERENCE_HEAD_TRIM_SECONDS = 2.0
 REFERENCE_SAMPLE_STRIDE = 3
 REFERENCE_TAIL_TRIM_FRAMES = 10
@@ -901,8 +918,10 @@ def copy_keepable_bags(
     threshold_ms: float,
     input_root: Path,
     output_folder: str | Path,
+    max_workers: int = 1,
+    flat_output: bool = False,
 ) -> Iterator[tuple[float, str, str, int, int]]:
-    """复制可保留 bag。yield (progress, log_line, status, copied, failed)。"""
+    """Copy keepable bags and yield progress, logs, and success counts."""
     selected = filter_keepable(stats, threshold_ms)
     out = Path(output_folder).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -912,32 +931,130 @@ def copy_keepable_bags(
         yield 100.0, msg, msg, 0, 0
         return
 
-    copied = failed = 0
-    for i, s in enumerate(selected, start=1):
-        src = Path(s.bag_path)
+    workers = normalize_analysis_workers(max_workers)
+    copied = skipped = failed = processed = 0
+    name_sources: dict[str, list[Path]] = {}
+    if flat_output:
+        for stat in selected:
+            src = Path(stat.bag_path)
+            name_sources.setdefault(src.name.casefold(), []).append(src)
+    conflicts = {
+        name: sources for name, sources in name_sources.items() if len(sources) > 1
+    }
+
+    if conflicts:
+        conflict_details = "; ".join(
+            f"{sources[0].name}: " + ", ".join(str(path) for path in sources)
+            for sources in conflicts.values()
+        )
+        summary = (
+            f"导出已取消。发现 {len(conflicts)} 组 episode 同名冲突；"
+            f"为避免产生不完整数据集，本次未复制任何 bag。{conflict_details}"
+        )
+        yield 100.0, summary, summary, 0, total
+        return
+
+    def copy_one(index: int, stat: BagDelayStat) -> tuple[int, str, str]:
+        temp_path: Path | None = None
         try:
-            rel = src.relative_to(input_root)
-        except ValueError:
-            rel = Path(src.name)
-        dest = out / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            if dest.exists():
-                line = f"[{i}/{total}] 已存在，跳过 {dest}"
+            src = Path(stat.bag_path).expanduser().resolve()
+            if flat_output:
+                dest = out / src.name
             else:
-                shutil.copy2(src, dest)
-                line = f"[{i}/{total}] 已复制 {src.name} -> {dest}"
-            copied += 1
+                try:
+                    dest = out / src.relative_to(input_root.expanduser().resolve())
+                except ValueError:
+                    dest = out / src.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(dest):
+                return index, "skipped", f"已存在，未覆盖 {dest}"
+
+            fd, temp_name = tempfile.mkstemp(
+                prefix=f".{dest.name}.",
+                suffix=".part",
+                dir=dest.parent,
+            )
+            os.close(fd)
+            temp_path = Path(temp_name)
+            shutil.copy2(src, temp_path)
+            try:
+                os.link(temp_path, dest)
+            except FileExistsError:
+                return index, "skipped", f"已存在，未覆盖 {dest}"
+            except OSError as exc:
+                unsupported_link_errors = {
+                    errno.EPERM,
+                    errno.EACCES,
+                    errno.EXDEV,
+                    errno.ENOSYS,
+                    errno.EOPNOTSUPP,
+                }
+                if exc.errno not in unsupported_link_errors:
+                    raise
+
+                try:
+                    dest_fd = os.open(
+                        dest,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o666,
+                    )
+                except FileExistsError:
+                    return index, "skipped", f"已存在，未覆盖 {dest}"
+                try:
+                    with temp_path.open("rb") as source_file, os.fdopen(
+                        dest_fd, "wb"
+                    ) as destination_file:
+                        shutil.copyfileobj(
+                            source_file,
+                            destination_file,
+                            length=16 * 1024 * 1024,
+                        )
+                    shutil.copystat(temp_path, dest)
+                except Exception:
+                    Path(dest).unlink(missing_ok=True)
+                    raise
+            return index, "copied", f"已复制 {src.name} -> {dest}"
         except Exception as exc:  # noqa: BLE001
-            failed += 1
-            line = f"[{i}/{total}] 失败 {src.name}: {exc}"
-            logger.exception("Copy failed: %s", src)
-        status = f"复制中 {i}/{total} → {out}"
-        yield round(i / total * 100, 1), line, status, copied, failed
+            source_name = Path(stat.bag_path).name
+            logger.exception("Copy failed: %s", stat.bag_path)
+            return index, "failed", f"失败 {source_name}: {exc}"
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+
+    work_items: list[tuple[int, BagDelayStat]] = []
+    yield (
+        0.0,
+        f"准备使用 {workers} 个导出 worker，目标目录={out}",
+        f"准备并行导出 {total} 个 bag...",
+        copied,
+        failed,
+    )
+    for index, stat in enumerate(selected, start=1):
+        work_items.append((index, stat))
+
+    if work_items:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(copy_one, index, stat): index
+                for index, stat in work_items
+            }
+            for future in as_completed(futures):
+                _index, outcome, detail = future.result()
+                processed += 1
+                if outcome == "copied":
+                    copied += 1
+                elif outcome == "skipped":
+                    skipped += 1
+                else:
+                    failed += 1
+                line = f"[{processed}/{total}] {detail}"
+                status = f"导出中 {processed}/{total} -> {out}"
+                yield round(processed / total * 100, 1), line, status, copied, failed
 
     summary = (
-        f"完成。阈值={threshold_ms:g}ms，可保留={total}，"
-        f"已复制={copied}，失败={failed}，输出目录={out}"
+        f"完成。阈值={threshold_ms:g}ms，可保留={total}，worker={workers}，"
+        f"已复制={copied}，已存在未覆盖={skipped}，失败={failed}，输出目录={out}"
     )
     yield 100.0, summary, summary, copied, failed
 
@@ -948,8 +1065,14 @@ def iter_measure_bags(
     reference_topic: str,
     target_topics: list[str],
     should_stop: Callable[[], bool] | None = None,
+    max_workers: int = 1,
 ) -> Iterator[tuple[float, str, list[BagDelayStat]]]:
-    """逐个测量 bag，yield (progress, status, stats_so_far)。"""
+    """Measure bags and yield ``(progress, status, stats_so_far)``.
+
+    ``max_workers=1`` preserves the original serial behavior. Parallel results
+    are always returned in the same order as ``bags``, regardless of which
+    worker finishes first.
+    """
     stats: list[BagDelayStat] = []
     total = len(bags)
     targets = [t for t in target_topics if t and t != reference_topic]
@@ -958,6 +1081,17 @@ def iter_measure_bags(
         return
     if not targets:
         yield 100.0, "请至少选择一个要检查的 Target Topic。", stats
+        return
+
+    workers = normalize_analysis_workers(max_workers)
+    if workers > 1:
+        yield from _iter_measure_bags_parallel(
+            bags,
+            reference_topic=reference_topic,
+            target_topics=targets,
+            should_stop=should_stop,
+            max_workers=workers,
+        )
         return
 
     for i, bag in enumerate(bags, start=1):
@@ -1004,6 +1138,212 @@ def iter_measure_bags(
         f"完成。共分析 {total} 个 bag，每个对照 {len(targets)} 个 Topic。",
         stats,
     )
+
+
+def normalize_analysis_workers(value: object) -> int:
+    """Convert a UI/config value to the supported worker range."""
+    try:
+        workers = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        workers = DEFAULT_ANALYSIS_WORKERS
+    return max(1, min(MAX_ANALYSIS_WORKERS, workers))
+
+
+def _failed_measurement(
+    bag: Path,
+    targets: list[str],
+    exc: Exception,
+) -> BagDelayStat:
+    message = f"parallel worker failed: {type(exc).__name__}: {exc}"
+    return BagDelayStat(
+        bag_name=bag.name,
+        bag_path=str(bag),
+        missing_target=True,
+        missing_reference=True,
+        message=message,
+        topic_stats=[
+            TopicAlignStat(topic=topic, missing=True, message=message)
+            for topic in targets
+        ],
+        bag_topics=[],
+    )
+
+
+def _measurement_detail(
+    completed_count: int,
+    total: int,
+    stat: BagDelayStat,
+) -> str:
+    n_ok = sum(
+        1
+        for topic in stat.topic_stats
+        if not topic.missing and topic.max_delay_ms is not None
+    )
+    n_all = len(stat.topic_stats)
+    if stat.missing_reference:
+        result = f"缺少 Reference | {stat.message}"
+    elif stat.missing_target:
+        result = f"缺少Topic ({n_ok}/{n_all} ok) | {stat.message}"
+    else:
+        result = (
+            f"worst_max_delay={stat.max_delay_ms:.3f}ms "
+            f"({n_ok}/{n_all} topics)"
+        )
+    return f"[{completed_count}/{total}] {stat.bag_name} -> {result}"
+
+
+def _iter_measure_bags_parallel(
+    bags: list[Path],
+    *,
+    reference_topic: str,
+    target_topics: list[str],
+    should_stop: Callable[[], bool] | None,
+    max_workers: int,
+) -> Iterator[tuple[float, str, list[BagDelayStat]]]:
+    """Run independent bag measurements in a bounded process pool."""
+    total = len(bags)
+    completed: dict[int, BagDelayStat] = {}
+    pending: dict[object, int] = {}
+    next_index = 0
+    finished = False
+    last_yield_count = 0
+    last_yield_time = monotonic()
+    context = multiprocessing.get_context("spawn")
+    executor = ProcessPoolExecutor(max_workers=max_workers, mp_context=context)
+
+    def submit_until_full() -> BrokenProcessPool | None:
+        nonlocal next_index
+        while next_index < total and len(pending) < max_workers:
+            index = next_index
+            try:
+                future = executor.submit(
+                    measure_bag_delay,
+                    bags[index],
+                    reference_topic=reference_topic,
+                    target_topics=target_topics,
+                )
+            except BrokenProcessPool as exc:
+                return exc
+            pending[future] = index
+            next_index += 1
+        return None
+
+    def fail_unfinished(exc: Exception) -> None:
+        nonlocal next_index
+        for future, index in list(pending.items()):
+            if future.done():
+                try:
+                    completed[index] = future.result()
+                    continue
+                except Exception as future_exc:
+                    completed[index] = _failed_measurement(
+                        bags[index], target_topics, future_exc
+                    )
+            else:
+                future.cancel()
+                completed[index] = _failed_measurement(
+                    bags[index], target_topics, exc
+                )
+        pending.clear()
+        while next_index < total:
+            completed[next_index] = _failed_measurement(
+                bags[next_index], target_topics, exc
+            )
+            next_index += 1
+
+    try:
+        pool_error = submit_until_full()
+        yield (
+            0.0,
+            f"已启动 {max_workers} 个并行 worker，正在分析 {total} 个 bag...",
+            [],
+        )
+        if pool_error is not None:
+            fail_unfinished(pool_error)
+            finished = True
+            ordered = [completed[index] for index in range(total)]
+            yield 100.0, f"并行进程池启动失败：{pool_error}", ordered
+            return
+
+        while pending:
+            stop_requested = bool(should_stop and should_stop())
+            done, _ = wait(
+                tuple(pending),
+                timeout=0.0 if stop_requested else ANALYSIS_STOP_POLL_SECONDS,
+                return_when=FIRST_COMPLETED,
+            )
+
+            last_stat: BagDelayStat | None = None
+            pool_error = None
+            for future in sorted(done, key=lambda item: pending[item]):
+                index = pending.pop(future)
+                try:
+                    stat = future.result()
+                except Exception as exc:  # worker/pool failures must remain visible
+                    logger.exception("Parallel measurement failed: %s", bags[index])
+                    stat = _failed_measurement(bags[index], target_topics, exc)
+                    if isinstance(exc, BrokenProcessPool):
+                        pool_error = exc
+                completed[index] = stat
+                last_stat = stat
+
+            if pool_error is not None:
+                fail_unfinished(pool_error)
+                finished = True
+                ordered = [completed[index] for index in range(total)]
+                yield 100.0, f"并行进程池异常：{pool_error}", ordered
+                return
+
+            stop_requested = stop_requested or bool(should_stop and should_stop())
+            if stop_requested:
+                ordered = [completed[index] for index in sorted(completed)]
+                yield (
+                    round(len(completed) / total * 100, 1),
+                    "分析已停止；等待中的任务已取消，正在执行的任务将完成当前 bag 后退出。",
+                    ordered,
+                )
+                return
+
+            if not done:
+                continue
+
+            pool_error = submit_until_full()
+            if pool_error is not None:
+                fail_unfinished(pool_error)
+                finished = True
+                ordered = [completed[index] for index in range(total)]
+                yield 100.0, f"并行进程池异常：{pool_error}", ordered
+                return
+
+            ordered = [completed[index] for index in sorted(completed)]
+            assert last_stat is not None
+            now = monotonic()
+            should_refresh = (
+                len(completed) - last_yield_count >= max_workers
+                or now - last_yield_time >= ANALYSIS_UI_UPDATE_SECONDS
+            )
+            if len(completed) < total and should_refresh:
+                yield (
+                    round(len(completed) / total * 100, 1),
+                    _measurement_detail(len(completed), total, last_stat),
+                    ordered,
+                )
+                last_yield_count = len(completed)
+                last_yield_time = now
+
+        finished = True
+        ordered = [completed[index] for index in range(total)]
+        yield (
+            100.0,
+            f"完成。使用 {max_workers} 个并行 worker 分析 {total} 个 bag，"
+            f"每个对照 {len(target_topics)} 个 Topic。",
+            ordered,
+        )
+    finally:
+        if not finished:
+            for future in pending:
+                future.cancel()
+        executor.shutdown(wait=True, cancel_futures=not finished)
 
 def analyze_bag(
     bag_path: Path,
